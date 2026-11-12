@@ -48,7 +48,6 @@ module ads1118_spi #(
     logic [15:0] tx, rx;
 
     // Synchronize MISO into the clk domain. At 1 MHz SCLK and 12 MHz clk
-    // there's ~6 clk cycles per half-period, so 2 flops of delay is fine.
     logic miso_s1, miso_s2;
     always_ff @(posedge clk) begin
         miso_s1 <= miso;
