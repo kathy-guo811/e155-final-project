@@ -7,10 +7,10 @@
 // One 16-bit transaction per `start` pulse:
 //   CS low -> wait SETUP -> 16 SCLK cycles (shift CFG out, data in) -> CS high
 //
-// CFG = 0xC36B decodes as:
+// CFG = 16'b1100010101101011 decodes as:
 //   [15]    SS=1      start a single-shot conversion
 //   [14:12] MUX=100   AIN0 vs GND
-//   [11:9]  PGA=001   +/-4.096 V FS -> 1 LSB = 125 uV
+//   [11:9]  PGA=010   +/-2.048 V FS -> 1 LSB = 62.5 uV
 //   [8]     MODE=1    single-shot / power-down
 //   [7:5]   DR=011    64 SPS -> conversion ~15.6 ms, about half the 31.25 ms tick.
 //                     (DR=32 SPS would take the whole 31.25 ms; with the
@@ -25,7 +25,7 @@
 // delay, which doesn't matter for GSR. It also means you never have to poll
 // DRDY: the conversion finishes long before the next tick.
 module ads1118_spi #(
-    parameter logic [15:0] CFG   = 16'hC36B,
+    parameter logic [15:0] CFG   = 16'b1100010101101011,  // config word to send
     parameter int          HALF  = 6,   // clk cycles per SCLK half-period: 12 MHz / (2*6) = 1 MHz
     parameter int          SETUP = 6    // CS-low to first SCLK edge (datasheet tCSSC >= 100 ns)
 ) (
