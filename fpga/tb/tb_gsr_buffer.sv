@@ -77,6 +77,6 @@ module tb_gsr_buffer;
 
         if (errors == 0) $display("PASS: all checks passed");
         else             $display("FAIL: %0d errors", errors);
-        $stop;
+        $finish;
     end
 endmodule
