@@ -1,3 +1,4 @@
+`timescale 1ns/1ps
 // gsr_buffer.sv — circular buffer of raw GSR samples in block RAM (EBR).
 //
 // Every `we` pulse (data_valid from ads1118_spi) writes one 16-bit sample at
