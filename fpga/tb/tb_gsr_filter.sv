@@ -33,8 +33,8 @@ module tb_gsr_filter;
     end
 
     initial begin
-        $readmemh("filter_in.hex", vin);
-        $readmemh("filter_expected.hex", vexp);
+        $readmemh("fpga/vectors/filter_input.hex", vin);
+        $readmemh("fpga/vectors/filter_expected.hex", vexp);
         if (vin[0] === 16'bx) begin
             $display("ERROR: filter_in.hex not found. Run gen_filter_vectors.py first.");
             $finish;
