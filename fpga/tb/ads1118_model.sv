@@ -7,7 +7,7 @@
 // - Checks every config word it receives against EXPECT_CFG.
 `timescale 1ns/1ps
 module ads1118_model #(
-    parameter logic [15:0] EXPECT_CFG = 16'hC36B,
+    parameter logic [15:0] EXPECT_CFG = 16'b1100010101101011,
     parameter int          NSAMP      = 256
 ) (
     input  logic cs_n,
