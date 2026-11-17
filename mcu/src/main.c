@@ -27,9 +27,9 @@ Bring-up tests for both MCU data paths, run together in one 10 ms loop.
 #include "MAX30102.h"
 #include "FPGA_FRAME.h"
 
-#define RUN_PPG           1      // 1 = run the MAX30102 test
+#define RUN_PPG           0      // 1 = run the MAX30102 test
 #define RUN_FPGA          1      // 1 = run the FPGA link test
-#define COUNTER_TEST      1      // 1 = FPGA is running top_1e_test.sv
+#define COUNTER_TEST      0      // 1 = FPGA is running top_1e_test.sv
 #define FRAME_PERIOD_MS   10
 #define STATS_EVERY       100    // frames between stats lines (100 = 1 s)
 #define PATTERN_BASELINE  0b0001001000110100   // must match top_1e_test.sv
