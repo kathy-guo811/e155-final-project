@@ -10,13 +10,13 @@
 // SPI settings (must match fpga/src/spi_slave_tx.sv):
 //   SPI1, master, mode 0 (CPOL = 0, CPHA = 0), MSB first, 8-bit transfers
 //   SCLK = 80 MHz / 64 = 1.25 MHz  (FPGA slave tested in sim up to 2 MHz)
-//   Software chip select on PA8
+//   Software chip select on PA11
 //
 // Pins:
-//   PA5  SPI1 SCK   → FPGA sclk
-//   PA6  SPI1 MISO  ← FPGA miso
+//   PA5  SPI1 SCK   → FPGA sclk (P26 via SW7 switch 3)
+//   PA6  SPI1 MISO  ← FPGA miso (P27 via SW7 switch 4)
 //   PB5  SPI1 MOSI  (configured by initSPI but not connected; FPGA ignores it)
-//   PA8  GPIO       → FPGA cs_n
+//   PA11 GPIO       → FPGA cs_n (P20 via SW7 switch 5)
 //
 // Frame layout (byte 0 first, multi-byte fields high byte first):
 //   0      header       0b10100101
@@ -47,7 +47,7 @@
 #define STATUS_NEW_SAMPLE   (1 << 0)
 #define STATUS_SCR_ACTIVE   (1 << 1)
 
-#define FPGA_CS_PIN         PA8
+#define FPGA_CS_PIN         PA11
 #define FPGA_SPI_BR         0b101   // SCLK = 80 MHz / 2^(5+1) = 1.25 MHz
 
 // parseFPGAFrame() return codes
