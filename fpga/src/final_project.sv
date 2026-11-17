@@ -1,115 +1,131 @@
-// tb_final_project.sv — end-to-end test of final_project:
-//   fake ADS1118 → FPGA (1A–1E) → fake STM32 reading frames at 1.25 MHz.
+// final_project.sv — FPGA top level: the full GSR path (1A–1E).
 //
-// Checks on every frame: header, checksum, seq +1, delta = filtered - baseline.
-// Checks on every new sample:
-//   raw      = the ADC model's samples, in order (through the BRAM buffer)
-//   filtered = bit-exact IIR of raw (same math as gsr_filter)
-// End checks: baseline set during calibration, the model's SCR bump detected.
+//   HSOSC 12 MHz
+//   tick_gen (32 Hz) → ads1118_spi ──data──┬→ gsr_buffer (BRAM, 1024 samples)
+//                       ↕ ADC SPI          └→ gsr_filter → gsr_features (1D)
+//                                                              │
+//   STM32 SPI ↔ gsr_frame ← raw (newest sample read back from BRAM),
+//                           filtered, baseline, delta, SCR fields
 //
-// Timing scaled 50x (tick 625 us, frames every 200 us). Calibration shortened
-// to 16 samples (CAL_SHIFT = 4).
-`timescale 1ns/1ps
-module tb_final_project;
-    localparam int NSAMPLES  = 220;   // ADC model bump starts at sample 100
-    localparam int CAL_START = 40;    // let the filter settle first
-    localparam int CAL_END   = 70;
+// Calibration: the MCU drives mcu_cal high for the 30 s calibration window
+// (session state machine, 4B). While it is high, gsr_features averages the
+// filtered signal into the baseline and the SCR detector is off.
+//
+// Clock: internal 48 MHz HSOSC / 4 = 12 MHz. Reset: internal power-on reset.
+module final_project #(
+    parameter int                 TICK_PERIOD = 375_000,  // 12 MHz / 375,000 = 32 Hz
+    parameter int                 CAL_SHIFT   = 9,        // baseline = average of 512 samples
+    parameter logic signed [15:0] SLOPE_TH    = 16'sd8    // SCR rise threshold (tune on real data)
+) (
+    // ADS1118 (FPGA is SPI master, mode 1)
+    output logic adc_cs_n,
+    output logic adc_sclk,
+    output logic adc_din,      // to ADS1118 DIN
+    input  logic adc_dout,     // from ADS1118 DOUT/DRDY
 
-    logic adc_cs_n, adc_sclk, adc_din, adc_dout;
-    logic mcu_sclk, mcu_cs_n, mcu_miso, mcu_cal = 0, led;
-    logic [127:0] rx;
-    int           n_frames;
+    // STM32 (FPGA is SPI slave, mode 0)
+    input  logic mcu_sclk,     // STM32 PA5
+    input  logic mcu_cs_n,     // STM32 PA8
+    output logic mcu_miso,     // STM32 PA6
+    input  logic mcu_cal,      // STM32 GPIO: high during calibration
 
-    final_project #(.TICK_PERIOD(7_500), .CAL_SHIFT(4)) dut (.*);
+    output logic led           // on while an SCR is in progress
+);
+    // ---------------- clock and power-on reset ----------------
+    logic clk;
+    HSOSC #(.CLKHF_DIV("0b10")) hf_osc (       // 48 MHz / 4 = 12 MHz
+        .CLKHFPU(1'b1), .CLKHFEN(1'b1), .CLKHF(clk)
+    );
 
-    ads1118_model u_adc (.cs_n(adc_cs_n), .sclk(adc_sclk), .din(adc_din), .dout(adc_dout));
+    logic [3:0] por_cnt = 4'b0000;             // FFs start at 0 after configuration
+    logic       rst_n;
+    always_ff @(posedge clk)
+        if (por_cnt != 4'b1111) por_cnt <= por_cnt + 4'b0001;
+    assign rst_n = (por_cnt == 4'b1111);
 
-    stm32_spi_master_model #(.SCLK_HALF_NS(400.0)) u_mcu
-        (.cs_n(mcu_cs_n), .sclk(mcu_sclk), .miso(mcu_miso), .rx, .n_frames);
+    // mcu_cal comes from the STM32's clock domain: synchronize it
+    logic [1:0] cal_s;
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) cal_s <= 2'b00;
+        else        cal_s <= {cal_s[0], mcu_cal};
 
-    // ---------------- reference: expected raw and filtered ----------------
-    // The ADC returns the previous conversion (read 0 gives 0, read k gives
-    // samples[k-1]); final_project drops read 0, so sample k = samples[k].
-    function automatic logic signed [15:0] exp_raw(int k);
-        return u_adc.samples[k];
-    endfunction
+    // ---------------- 1A: sample the ADC at 32 Hz ----------------
+    logic        tick, data_valid;
+    logic [15:0] adc_data;
 
-    logic signed [18:0] acc;      // IIR model, K = 3 (same as gsr_filter)
+    logic        adc_valid, first_done;
 
-    // ---------------- frame checker ----------------
-    int errors = 0, samples = 0, frames = 0, led_on = 0;
-    logic [7:0] csum, prev_seq;
-    logic signed [15:0] raw, filt, base, delta, exp_f;
-    logic [7:0]  status, cnt;
-    logic [15:0] amp;
-    bit have_prev = 0;
-    logic signed [15:0] base_after_cal = 0;
-    logic [7:0] final_cnt; logic [15:0] final_amp;
-    logic [7:0] cnt_before_bump = 0;
+    tick_gen #(.PERIOD(TICK_PERIOD)) u_tick (.clk, .rst_n, .tick);
 
-    task automatic err(string msg);
-        if (errors < 15) $display("frame %0d: %s", frames, msg);
-        errors++;
-    endtask
+    ads1118_spi u_adc (
+        .clk, .rst_n, .start(tick),
+        .cs_n(adc_cs_n), .sclk(adc_sclk), .mosi(adc_din), .miso(adc_dout),
+        .data(adc_data), .data_valid(adc_valid), .busy()
+    );
 
-    always @(n_frames) if (n_frames > 0) begin
-        frames++;
-        csum = 8'b0;
-        for (int i = 0; i < 15; i++) csum ^= rx[127-8*i -: 8];
-        {raw, filt, base, delta} = rx[111:48];
-        status = rx[47:40]; cnt = rx[39:32]; amp = rx[31:16];
+    // Drop the very first ADC reading. Because each read returns the PREVIOUS
+    // conversion, the first read after power-up is always 0. Letting it
+    // through starts the filter at 0, and its climb to the real level looks
+    // like a huge SCR.
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n)         first_done <= 1'b0;
+        else if (adc_valid) first_done <= 1'b1;
+    assign data_valid = adc_valid & first_done;
 
-        if (rx[127:120] !== 8'b1010_0101) err("bad header");
-        if (rx[7:0] !== csum)             err("bad checksum");
-        if (have_prev && rx[119:112] !== prev_seq + 8'd1) err("seq gap");
-        prev_seq = rx[119:112]; have_prev = 1;
-        if (delta !== filt - base) err($sformatf("delta %0d != filtered %0d - baseline %0d", delta, filt, base));
+    // ---------------- 1B: store raw samples in block RAM ----------------
+    logic [9:0]         wptr, newest_addr;
+    logic [15:0]        buf_newest;
+    logic signed [15:0] raw;
+    assign newest_addr = wptr - 10'd1;          // newest sample is at wptr - 1
+    assign raw         = buf_newest;
 
-        if (status[0]) begin
-            if (raw !== exp_raw(samples))
-                err($sformatf("sample %0d raw=%0d expected %0d", samples, raw, exp_raw(samples)));
-            acc   = (samples == 0) ? (exp_raw(0) <<< 3) : acc + exp_raw(samples) - (acc >>> 3);
-            exp_f = acc >>> 3;
-            if (filt !== exp_f)
-                err($sformatf("sample %0d filtered=%0d expected %0d", samples, filt, exp_f));
-            if (samples == CAL_END + 5) base_after_cal = base;
-            if (samples == 99) cnt_before_bump = cnt;       // bump starts at 100
-            samples++;
-        end
-        final_cnt = cnt; final_amp = amp;
-    end
+    gsr_buffer #(.AW(10)) u_buf (
+        .clk, .rst_n,
+        .we(data_valid), .wdata(adc_data),
+        .raddr(newest_addr),
+        .rdata(buf_newest), .wptr
+    );
 
-    always @(posedge led) led_on++;
+    // ---------------- 1C: filter ----------------
+    logic               filt_valid;
+    logic signed [15:0] filtered;
 
-    // ---------------- calibration window (what the MCU will do) ----------------
-    initial begin
-        wait (samples == CAL_START); mcu_cal = 1;
-        wait (samples == CAL_END);   mcu_cal = 0;
-    end
+    gsr_filter #(.K(3)) u_filt (
+        .clk, .rst_n,
+        .in_valid(data_valid), .x(adc_data),
+        .out_valid(filt_valid), .y(filtered)
+    );
 
-    initial begin
-        $dumpfile("tb_final_project.vcd");
-        // Dump only what's worth looking at. Dumping everything (including the
-        // 12 MHz clock for ~1.6M cycles) makes a waveform file of 100+ MB.
-        $dumpvars(1, tb_final_project);          // ADC + MCU SPI wires, cal, led
-        $dumpvars(0, tb_final_project.dut.raw);  // values that change once per sample
-        $dumpvars(0, tb_final_project.dut.filtered);
-        $dumpvars(0, tb_final_project.dut.baseline);
-        $dumpvars(0, tb_final_project.dut.delta);
-        $dumpvars(0, tb_final_project.dut.scr_active);
-        $dumpvars(0, tb_final_project.dut.scr_count);
-        $dumpvars(0, tb_final_project.dut.scr_amp);
-        wait (samples == NSAMPLES);
-        #1000;
-        $display("--------------------------------------------");
-        $display("frames checked   : %0d", frames);
-        $display("samples checked  : %0d (raw + filtered bit-exact)", samples);
-        $display("baseline after cal: %0d  (signal ~%0d at that point)", base_after_cal, exp_raw(CAL_END));
-        $display("SCRs before bump : %0d  (expect 0)", cnt_before_bump);
-        $display("SCRs detected    : %0d, last amplitude %0d codes, LED pulses %0d", final_cnt, final_amp, led_on);
-        $display("errors           : %0d", errors);
-        $display("%s", (errors == 0 && base_after_cal > 16'sd7000 && cnt_before_bump == 0 &&
-                              final_cnt == 1 && final_amp > 16'd500 && final_amp < 16'd3000 && led_on >= 1) ? "PASS" : "FAIL");
-        $finish;
-    end
+    // ---------------- 1D: baseline, delta, SCR ----------------
+    logic signed [15:0] baseline, delta;
+    logic               scr_active;
+    logic        [7:0]  scr_count;
+    logic        [15:0] scr_amp;
+
+    gsr_features #(.CAL_SHIFT(CAL_SHIFT), .SLOPE_TH(SLOPE_TH)) u_feat (
+        .clk, .rst_n,
+        .cal(cal_s[1]),
+        .in_valid(filt_valid), .filtered,
+        .baseline, .delta, .scr_active, .scr_count, .scr_amp
+    );
+
+    // ---------------- 1E: frame to the MCU ----------------
+    // After data_valid, every block needs at most 2 clocks to settle:
+    //   buffer read-back, filter (1 clock), features (1 more clock).
+    // Wait 3 clocks, then hand the whole set to gsr_frame at once.
+    logic [2:0] dv_d;
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) dv_d <= 3'b000;
+        else        dv_d <= {dv_d[1:0], data_valid};
+
+    gsr_frame u_frame (
+        .clk, .rst_n,
+        .sample_valid(dv_d[2]),
+        .raw,
+        .filtered, .baseline, .delta,
+        .scr_active, .scr_count, .scr_amp,
+        .sclk(mcu_sclk), .cs_n(mcu_cs_n), .miso(mcu_miso)
+    );
+
+    assign led = scr_active;
 endmodule

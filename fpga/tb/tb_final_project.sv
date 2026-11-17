@@ -89,7 +89,16 @@ module tb_final_project;
 
     initial begin
         $dumpfile("tb_final_project.vcd");
-        $dumpvars(0, tb_final_project);
+        // Dump only what's worth looking at. Dumping everything (including the
+        // 12 MHz clock for ~1.6M cycles) makes a waveform file of 100+ MB.
+        $dumpvars(1, tb_final_project);          // ADC + MCU SPI wires, cal, led
+        $dumpvars(0, tb_final_project.dut.raw);  // values that change once per sample
+        $dumpvars(0, tb_final_project.dut.filtered);
+        $dumpvars(0, tb_final_project.dut.baseline);
+        $dumpvars(0, tb_final_project.dut.delta);
+        $dumpvars(0, tb_final_project.dut.scr_active);
+        $dumpvars(0, tb_final_project.dut.scr_count);
+        $dumpvars(0, tb_final_project.dut.scr_amp);
         wait (samples == NSAMPLES);
         #1000;
         $display("--------------------------------------------");
